@@ -43,6 +43,7 @@ func (r *rateLimiterWithLocalImpl) Allow() bool {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*1)
 		defer cancel()
 		if res, err := r.remote.Allow(ctx, r.key, r.remoteLimiter); err == nil {
+			defer r.local.Allow()
 			return res.Allowed == 1
 		} else {
 			fmt.Println(err.Error(), "downgrade")
@@ -57,7 +58,8 @@ func (r *rateLimiterWithLocalImpl) AllowN(n int) bool {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*1)
 		defer cancel()
 		if res, err := r.remote.AllowN(ctx, r.key, r.remoteLimiter, n); err == nil {
-			return res.Allowed == 1
+			defer r.local.AllowN(time.Now(), n)
+			return res.Allowed == n
 		} else {
 			fmt.Println(err.Error(), "downgrade")
 		}

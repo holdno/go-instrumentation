@@ -18,12 +18,16 @@ func ExampleNew() {
 	_ = rdb.FlushDB(ctx).Err()
 	limit := ratelimit.New("project:123", 10, time.Second*10, ratelimit.NewLimiter(rdb, ratelimit.KeyPrefix("yourprefix_")))
 
-	fmt.Println(limit.Allow())
-
+	fmt.Println(limit.AllowN(2))
+	rdb.Close()
 	fmt.Println(limit.AllowN(10))
+	fmt.Println(limit.AllowN(8))
 
 	// Output:
 	// true
+	// redis: client is closed downgrade
+	// false
+	// redis: client is closed downgrade
 	// true
 }
 
