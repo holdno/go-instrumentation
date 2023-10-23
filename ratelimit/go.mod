@@ -1,4 +1,4 @@
-module github.com/holdno/go-instrumentation
+module github.com/holdno/go-instrumentation/ratelimit
 
 go 1.20
 
