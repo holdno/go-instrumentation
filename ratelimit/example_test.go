@@ -10,6 +10,41 @@ import (
 	"github.com/holdno/go-instrumentation/ratelimit"
 )
 
+func ExampleBucket() {
+	b := ratelimit.NewLeakyBucket[int](1, time.Second, nil)
+
+	length := 10
+	go func() {
+		for i := 0; i < length; i++ {
+			b.Set(i)
+			// do your logic
+		}
+		b.Done()
+	}()
+
+	for {
+		taskIndex, ok := b.Get()
+		if !ok {
+			fmt.Println("done")
+			break
+		}
+
+		fmt.Println(taskIndex)
+	}
+	// Output:
+	// 0
+	// 1
+	// 2
+	// 3
+	// 4
+	// 5
+	// 6
+	// 7
+	// 8
+	// 9
+	// done
+}
+
 func ExampleNew() {
 	ctx := context.Background()
 	rdb := redis.NewClient(&redis.Options{
