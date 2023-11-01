@@ -73,7 +73,7 @@ func fail2Step(cb *TwoStepCircuitBreaker[bool]) error {
 }
 
 func causePanic(cb *CircuitBreaker[bool]) error {
-	_, err := cb.Execute(func() (bool, error) { panic("oops"); return false, nil })
+	_, err := cb.Execute(func() (bool, error) { panic("oops") })
 	return err
 }
 
