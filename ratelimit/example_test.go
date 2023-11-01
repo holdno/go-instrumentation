@@ -3,6 +3,7 @@ package ratelimit_test
 import (
 	"context"
 	"fmt"
+	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -10,13 +11,14 @@ import (
 	"github.com/holdno/go-instrumentation/ratelimit"
 )
 
-func ExampleBucket() {
-	b := ratelimit.NewLeakyBucket[int](1, time.Second, nil)
+func TestExampleBucket(t *testing.T) {
+	b := ratelimit.NewLeakyBucket[int](5, time.Second, nil)
 
-	length := 10
+	length := 100
 	go func() {
 		for i := 0; i < length; i++ {
 			b.Set(i)
+			fmt.Println("set", i)
 			// do your logic
 		}
 		b.Done()

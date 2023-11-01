@@ -19,7 +19,7 @@ type rateLimiterWithLocalImpl struct {
 
 func New(key string, limit int, period time.Duration, remoteLimiter *Limiter) RateLimiter {
 	impl := &rateLimiterWithLocalImpl{
-		local:  rate.NewLimiter(rate.Every(period), limit),
+		local:  rate.NewLimiter(rate.Limit(float64(limit)/float64(period.Seconds())), limit),
 		remote: remoteLimiter,
 		remoteLimiter: Limit{
 			Period: period,
