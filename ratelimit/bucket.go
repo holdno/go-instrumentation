@@ -32,6 +32,13 @@ func (b *Bucket[T]) Set(task T) {
 }
 
 func (b *Bucket[T]) Get() (T, bool) {
+	for {
+		if b.limitr.Allow() {
+			break
+		}
+		time.Sleep(time.Millisecond * 20)
+	}
+
 	task, ok := <-b.taskChan
 	return task, ok
 }
@@ -41,11 +48,4 @@ func (b *Bucket[T]) Done() {
 	b.once.Do(func() {
 		close(b.taskChan)
 	})
-}
-
-func (b *Bucket[T]) Loop() bool {
-	if b.limitr.Allow() {
-		return !b.isClose.Load()
-	}
-	return false
 }
