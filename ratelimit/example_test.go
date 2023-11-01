@@ -12,16 +12,21 @@ import (
 )
 
 func TestExampleBucket(t *testing.T) {
-	b := ratelimit.NewLeakyBucket[int](5, time.Second, nil)
+	b := ratelimit.NewLeakyBucket[int]("key", 5, time.Second, nil)
 
-	length := 100
 	go func() {
-		for i := 0; i < length; i++ {
-			b.Set(i)
-			fmt.Println("set", i)
-			// do your logic
+		i := 0
+		for {
+			select {
+			case <-b.Closed():
+				fmt.Println("exit")
+				return
+			default:
+				b.Set(i)
+				i++
+			}
 		}
-		b.Done()
+
 	}()
 
 	for {
@@ -32,7 +37,13 @@ func TestExampleBucket(t *testing.T) {
 		}
 
 		fmt.Println(taskIndex)
+		if taskIndex == 20 {
+			break
+		}
 	}
+
+	b.Done()
+	time.Sleep(time.Second)
 	// Output:
 	// 0
 	// 1
