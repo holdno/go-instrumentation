@@ -74,6 +74,8 @@ func (c *connCache[K, T]) loop() {
 				expireReq.cc.Close()
 			}
 		case req := <-c.requests:
+			// 获取缓存之前就会过期
+			// 所以过期时加锁即可防止这边穿透  
 			if conn, exist := c.connections.Get(req.key); exist {
 				select {
 				case <-req.ctx.Done():
@@ -94,9 +96,15 @@ func (c *connCache[K, T]) loop() {
 			waiting[req.key] = []*connectionRequest[K]{req}
 			go c.buildNewConn(req, finished)
 		case conn := <-finished:
-			if conn.cc.Ready() { // first to check connect is ready to use.
-				c.connections.Add(conn.cc.CacheKey(), conn.cc)
+			if cachedConn, exist := c.connections.Get(conn.cc.CacheKey()); exist {
+				conn.cc.Close()
+				conn.cc = cachedConn
+			} else {
+				if conn.cc.Ready() { // first to check connect is ready to use.
+					c.connections.Add(conn.cc.CacheKey(), conn.cc)
+				}
 			}
+
 			for _, client := range waiting[conn.cc.CacheKey()] {
 				// Send it over if the client is still there. Abort otherwise.
 				// This also aborts if the cache context gets cancelled.
