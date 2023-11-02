@@ -2,6 +2,8 @@ package conncache
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
 )
@@ -24,19 +26,26 @@ type connectionRequest[K comparable] struct {
 	responseChan chan<- *cacheResponse[K]
 }
 
+type expireRequest[K comparable] struct {
+	key K
+	cc  Conn[K]
+}
+
 type BuildConnFunc[K comparable, T Conn[K]] func(context.Context, K) (T, error)
 
 type connCache[K comparable, T Conn[K]] struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	genConn     BuildConnFunc[K, T]
-	connections *expirable.LRU[K, T]
-	requests    chan *connectionRequest[K]
+	ctx            context.Context
+	cancel         context.CancelFunc
+	genConn        BuildConnFunc[K, T]
+	connections    *expirable.LRU[K, Conn[K]]
+	requests       chan *connectionRequest[K]
+	expireRequests chan *expireRequest[K]
 }
 
 func NewConnCache[K comparable, T Conn[K]](newConn BuildConnFunc[K, T]) *connCache[K, T] {
 	c := &connCache[K, T]{
-		genConn: newConn,
+		genConn:     newConn,
+		connections: expirable.NewLRU[K, Conn[K]](128, func(key K, value Conn[K]) {}, time.Minute*30),
 	}
 	return c
 }
@@ -44,9 +53,26 @@ func NewConnCache[K comparable, T Conn[K]](newConn BuildConnFunc[K, T]) *connCac
 func (c *connCache[K, T]) loop() {
 	waiting := make(map[K][]*connectionRequest[K])
 	finished := make(chan *cacheResponse[K])
+	locker := make(map[K]*sync.Mutex)
 
 	for {
 		select {
+		case expireReq := <-c.expireRequests:
+			// 过期的同时有新的连接请求
+			// 过期的同时有连接正在被持有
+			//
+			if !expireReq.cc.Ready() {
+				expireReq.cc.Close()
+			} else if locker[expireReq.key].TryLock() {
+				// current not building new connection or builded
+				if _, exist := c.connections.Get(expireReq.key); !exist {
+					if expireReq.cc.IsUsed() {
+						c.connections.Add(expireReq.key, expireReq.cc)
+					}
+				}
+			} else {
+				expireReq.cc.Close()
+			}
 		case req := <-c.requests:
 			if conn, exist := c.connections.Get(req.key); exist {
 				select {
@@ -66,21 +92,42 @@ func (c *connCache[K, T]) loop() {
 			}
 
 			waiting[req.key] = []*connectionRequest[K]{req}
-			go func() {
-				conn, err := c.genConn(req.ctx, req.key)
+			go c.buildNewConn(req, finished)
+		case conn := <-finished:
+			if conn.cc.Ready() { // first to check connect is ready to use.
+				c.connections.Add(conn.cc.CacheKey(), conn.cc)
+			}
+			for _, client := range waiting[conn.cc.CacheKey()] {
+				// Send it over if the client is still there. Abort otherwise.
+				// This also aborts if the cache context gets cancelled.
 				select {
-				case finished <- &cacheResponse[K]{
-					cc:  conn,
-					err: err,
-				}:
-					return
+				case client.responseChan <- conn:
+				case <-client.ctx.Done():
 				case <-c.ctx.Done():
-				case <-req.ctx.Done():
 				}
-				if err != nil {
-					conn.Close()
-				}
-			}()
+				close(client.responseChan)
+			}
+			delete(waiting, conn.cc.CacheKey())
+
+		case <-c.ctx.Done():
+			close(finished)
+			return
 		}
+	}
+}
+
+func (c *connCache[K, T]) buildNewConn(req *connectionRequest[K], respChan chan *cacheResponse[K]) {
+	conn, err := c.genConn(req.ctx, req.key)
+	select {
+	case respChan <- &cacheResponse[K]{
+		cc:  conn,
+		err: err,
+	}:
+		return
+	case <-c.ctx.Done():
+	case <-req.ctx.Done():
+	}
+	if err != nil {
+		conn.Close()
 	}
 }
