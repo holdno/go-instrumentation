@@ -1,4 +1,4 @@
-package connpool
+package conncache
 
 import (
 	"context"
@@ -22,6 +22,7 @@ type cacheValue[K comparable, T Conn[K]] struct {
 }
 
 type cacheResponse[K comparable, T Conn[K]] struct {
+	key K
 	cc  T
 	err error
 }
@@ -141,18 +142,20 @@ func (c *connCache[K, T]) removeCache(key K, reason RemoveReason) {
 	}
 }
 
-func (c *connCache[K, T]) response(req *connectionRequest[K, T], conn T) {
-	conn.add()
+func (c *connCache[K, T]) response(req *connectionRequest[K, T], conn *cacheResponse[K, T]) {
+	if conn.err == nil {
+		conn.cc.add()
+	}
 	defer close(req.responseChan)
 	select {
 	case <-req.ctx.Done():
 	case <-c.ctx.Done():
-	case req.responseChan <- &cacheResponse[K, T]{
-		cc: conn,
-	}:
+	case req.responseChan <- conn:
 		return
 	}
-	conn.Done()
+	if conn.err == nil {
+		conn.cc.Done()
+	}
 }
 
 func (c *connCache[K, T]) loop() {
@@ -201,7 +204,9 @@ func (c *connCache[K, T]) loop() {
 			if exist {
 				if conn.Ready() {
 					c.lowerConnCache[req.key].latestGetTime = c.now
-					c.response(req, conn)
+					c.response(req, &cacheResponse[K, T]{
+						cc: conn,
+					})
 					continue
 				}
 				c.removeCache(req.key, RemoveReason{
@@ -217,20 +222,22 @@ func (c *connCache[K, T]) loop() {
 			waiting[req.key] = []*connectionRequest[K, T]{req}
 			go c.buildNewConn(req, finished)
 		case conn := <-finished:
-			if cachedConn, exist := c.connections.Get(conn.cc.CacheKey()); exist {
-				conn.cc.Close()
+			if cachedConn, exist := c.connections.Get(conn.key); exist {
+				if conn.err == nil {
+					go conn.cc.Close()
+				}
 				conn.cc = cachedConn
-				c.lowerConnCache[conn.cc.CacheKey()].latestGetTime = c.now
-			} else if conn.cc.Ready() { // check connect is ready to use.
+				c.lowerConnCache[cachedConn.CacheKey()].latestGetTime = c.now
+			} else if conn.err == nil { // check connect is ready to use.
 				c.addToCache(conn.cc.CacheKey(), conn.cc)
 			}
 
-			for _, client := range waiting[conn.cc.CacheKey()] {
+			for _, client := range waiting[conn.key] {
 				// Send it over if the client is still there. Abort otherwise.
 				// This also aborts if the cache context gets cancelled.
-				c.response(client, conn.cc)
+				c.response(client, conn)
 			}
-			delete(waiting, conn.cc.CacheKey())
+			delete(waiting, conn.key)
 		case <-c.ctx.Done():
 			close(finished)
 			return
@@ -242,6 +249,7 @@ func (c *connCache[K, T]) buildNewConn(req *connectionRequest[K, T], respChan ch
 	conn, err := c.genConn(req.ctx, req.key)
 	select {
 	case respChan <- &cacheResponse[K, T]{
+		key: req.key,
 		cc:  conn,
 		err: err,
 	}:
@@ -249,7 +257,7 @@ func (c *connCache[K, T]) buildNewConn(req *connectionRequest[K, T], respChan ch
 	case <-c.ctx.Done():
 	case <-req.ctx.Done():
 	}
-	if err != nil {
-		conn.Close()
+	if err == nil {
+		go conn.Close()
 	}
 }

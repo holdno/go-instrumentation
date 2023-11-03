@@ -1,7 +1,8 @@
-package connpool_test
+package conncache_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -10,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	conncache "github.com/holdno/go-instrumentation/connpool"
-	"github.com/holdno/go-instrumentation/connpool/etc/greeter"
+	"github.com/holdno/go-instrumentation/conncache"
+	"github.com/holdno/go-instrumentation/conncache/etc/greeter"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
@@ -92,6 +93,57 @@ func genRandKeyFunc() func() string {
 		return string(b)
 	}
 	return getKey
+}
+
+func TestTimeout(t *testing.T) {
+	getKey := genRandKeyFunc()
+	ccCache := conncache.NewConnCache[string, *conncache.GRPCConn[string, *conncache.FakeConn]](100, time.Second, func(ctx context.Context, s string) (*conncache.GRPCConn[string, *conncache.FakeConn], error) {
+		cc := conncache.NewFakeConn(connectivity.Ready)
+		return conncache.WrapGrpcConn[string, *conncache.FakeConn](s, cc), nil
+	}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*5)
+	defer cancel()
+
+	expectError := context.DeadlineExceeded
+	var latestError error
+	for i := 0; i < 5; i++ {
+		_, err := ccCache.GetConn(ctx, getKey())
+		if err != nil {
+			latestError = err
+			break
+		}
+		time.Sleep(time.Millisecond * 2)
+	}
+
+	if latestError != expectError {
+		t.Fatal("unexpected")
+	}
+}
+
+func TestDialError(t *testing.T) {
+	getKey := genRandKeyFunc()
+	expectError := errors.New("dial error")
+	ccCache := conncache.NewConnCache[string, *conncache.GRPCConn[string, *conncache.FakeConn]](100, time.Second, func(ctx context.Context, s string) (*conncache.GRPCConn[string, *conncache.FakeConn], error) {
+		return nil, expectError
+	}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*5)
+	defer cancel()
+
+	var latestError error
+	for i := 0; i < 5; i++ {
+		_, err := ccCache.GetConn(ctx, getKey())
+		if err != nil {
+			latestError = err
+			break
+		}
+		time.Sleep(time.Millisecond * 2)
+	}
+
+	if latestError != expectError {
+		t.Fatal("unexpected")
+	}
 }
 
 func BenchmarkGetConn(b *testing.B) {

@@ -1,4 +1,4 @@
-package connpool
+package conncache
 
 import (
 	"sync/atomic"
