@@ -13,8 +13,8 @@ type Conn[K comparable] interface {
 	Ready() bool
 	Close() error
 	CacheKey() K
-	Add()
 	Done()
+	add()
 }
 
 type cacheValue[K comparable, T Conn[K]] struct {
@@ -69,6 +69,7 @@ func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration
 		requests:       make(chan *connectionRequest[K, T]),
 		expireRequests: expireRequests,
 		maxConn:        maxConn,
+		now:            time.Now(),
 	}
 
 	c.ctx, c.cancel = context.WithCancel(context.Background())
@@ -99,18 +100,37 @@ func (c *connCache[K, T]) GetConn(ctx context.Context, key K) (T, error) {
 }
 
 func (c *connCache[K, T]) addToCache(key K, value T) {
-	c.connections.Add(key, value)
-	c.lowerConnCache[key] = &cacheValue[K, T]{
-		latestGetTime: c.now,
-		conn:          value,
+	if _, exist := c.connections.Get(key); !exist {
+		c.connections.Add(key, value)
+	}
+	if _, exist := c.lowerConnCache[key]; !exist {
+		c.lowerConnCache[key] = &cacheValue[K, T]{
+			latestGetTime: c.now,
+			conn:          value,
+		}
 	}
 }
 
 func (c *connCache[K, T]) removeCache(key K) {
-	conn := c.lowerConnCache[key]
-	conn.conn.Close()
+	if conn, exist := c.lowerConnCache[key]; exist {
+		conn.conn.Close()
+		delete(c.lowerConnCache, key)
+	}
 	c.connections.Remove(key)
-	delete(c.lowerConnCache, key)
+}
+
+func (c *connCache[K, T]) returnConn(req *connectionRequest[K, T], conn T) {
+	conn.add()
+	defer close(req.responseChan)
+	select {
+	case <-req.ctx.Done():
+	case <-c.ctx.Done():
+	case req.responseChan <- &cacheResponse[K, T]{
+		cc: conn,
+	}:
+		return
+	}
+	conn.Done()
 }
 
 func (c *connCache[K, T]) loop() {
@@ -148,29 +168,20 @@ func (c *connCache[K, T]) loop() {
 			// 所以过期时加锁即可防止这边穿透
 			conn, exist := c.connections.Get(req.key)
 			if !exist {
-				connCacheValue, existCache := c.lowerConnCache[req.key]
-				if existCache {
-					exist = existCache
-					conn = connCacheValue.conn
+				lowerCacheValue, lowerExist := c.lowerConnCache[req.key]
+				if lowerExist {
+					exist = lowerExist
+					conn = lowerCacheValue.conn
 				}
 			}
 
 			if exist {
-				if !conn.Ready() {
-					c.removeCache(req.key)
-				} else {
+				if conn.Ready() {
 					c.lowerConnCache[req.key].latestGetTime = c.now
-					conn.Add()
-					select {
-					case <-req.ctx.Done():
-					case <-c.ctx.Done():
-					case req.responseChan <- &cacheResponse[K, T]{
-						cc: conn,
-					}:
-					}
-					close(req.responseChan)
+					c.returnConn(req, conn)
 					continue
 				}
+				c.removeCache(req.key)
 			}
 
 			if alreadyWaiting, ok := waiting[req.key]; ok {
@@ -184,25 +195,17 @@ func (c *connCache[K, T]) loop() {
 			if cachedConn, exist := c.connections.Get(conn.cc.CacheKey()); exist {
 				conn.cc.Close()
 				conn.cc = cachedConn
-			} else {
-				if conn.cc.Ready() { // first to check connect is ready to use.
-					c.addToCache(conn.cc.CacheKey(), conn.cc)
-				}
+				c.lowerConnCache[conn.cc.CacheKey()].latestGetTime = c.now
+			} else if conn.cc.Ready() { // check connect is ready to use.
+				c.addToCache(conn.cc.CacheKey(), conn.cc)
 			}
 
 			for _, client := range waiting[conn.cc.CacheKey()] {
 				// Send it over if the client is still there. Abort otherwise.
 				// This also aborts if the cache context gets cancelled.
-				conn.cc.Add()
-				select {
-				case client.responseChan <- conn:
-				case <-client.ctx.Done():
-				case <-c.ctx.Done():
-				}
-				close(client.responseChan)
+				c.returnConn(client, conn.cc)
 			}
 			delete(waiting, conn.cc.CacheKey())
-
 		case <-c.ctx.Done():
 			close(finished)
 			return

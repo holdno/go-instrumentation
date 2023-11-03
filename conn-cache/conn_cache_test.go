@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ func TestConnCache(t *testing.T) {
 	greeter.RegisterGreeterServer(srv, &Greeter{})
 	go srv.Serve(lis)
 
-	ccCache := conncache.NewConnCache[string, *conncache.GRPCConn[string]](10000, time.Millisecond, func(ctx context.Context, s string) (*conncache.GRPCConn[string], error) {
+	ccCache := conncache.NewConnCache[string, *conncache.GRPCConn[string]](10000, time.Second, func(ctx context.Context, s string) (*conncache.GRPCConn[string], error) {
 		fmt.Println("start to gen new connect")
 		cc, err := grpc.DialContext(ctx, s, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
@@ -44,13 +45,15 @@ func TestConnCache(t *testing.T) {
 		return conncache.NewGrpcConn[string](s, cc), nil
 	})
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		cc, err := ccCache.GetConn(ctx, endpoint)
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond)
 
 		client := greeter.NewGreeterClient(cc.ClientConn())
 		reqCtx, reqCancel := context.WithTimeout(context.Background(), time.Second)
@@ -62,6 +65,9 @@ func TestConnCache(t *testing.T) {
 			t.Fatal(err)
 		}
 		cc.Done()
-		t.Log(resp.Message)
+		fmt.Println(resp.Message)
+		time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond)
 	}
+
+	time.Sleep(time.Second)
 }

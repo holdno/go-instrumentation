@@ -22,7 +22,7 @@ func NewGrpcConn[K comparable](key K, cc *grpc.ClientConn) *GRPCConn[K] {
 	return gc
 }
 
-func (c *GRPCConn[K]) Add() {
+func (c *GRPCConn[K]) add() {
 	c.used.Add(1)
 }
 
