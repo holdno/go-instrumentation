@@ -42,7 +42,7 @@ func TestConnCache(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		return conncache.NewGrpcConn[string](s, cc), nil
+		return conncache.WrapGrpcConn[string](s, cc), nil
 	})
 
 	for i := 0; i < 20; i++ {

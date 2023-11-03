@@ -2,7 +2,6 @@ package conncache
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -11,7 +10,7 @@ import (
 type Conn[K comparable] interface {
 	IsUsed() bool
 	Ready() bool
-	Close() error
+	Close()
 	CacheKey() K
 	Done()
 	add()
@@ -100,26 +99,24 @@ func (c *connCache[K, T]) GetConn(ctx context.Context, key K) (T, error) {
 }
 
 func (c *connCache[K, T]) addToCache(key K, value T) {
-	if _, exist := c.connections.Get(key); !exist {
-		c.connections.Add(key, value)
-	}
 	if _, exist := c.lowerConnCache[key]; !exist {
 		c.lowerConnCache[key] = &cacheValue[K, T]{
 			latestGetTime: c.now,
 			conn:          value,
 		}
 	}
+	c.connections.Add(key, value)
 }
 
 func (c *connCache[K, T]) removeCache(key K) {
-	if conn, exist := c.lowerConnCache[key]; exist {
-		conn.conn.Close()
+	if value, exist := c.lowerConnCache[key]; exist {
+		go value.conn.Close()
 		delete(c.lowerConnCache, key)
 	}
 	c.connections.Remove(key)
 }
 
-func (c *connCache[K, T]) returnConn(req *connectionRequest[K, T], conn T) {
+func (c *connCache[K, T]) response(req *connectionRequest[K, T], conn T) {
 	conn.add()
 	defer close(req.responseChan)
 	select {
@@ -154,18 +151,14 @@ func (c *connCache[K, T]) loop() {
 			// 过期的同时有新的连接请求
 			// 过期的同时有连接正在被持有
 			value := c.lowerConnCache[expireReq.key]
-			if value.latestGetTime.Before(time.Now().Add(-c.expireTime)) {
-				if c.connections.Len() == c.maxConn || !value.conn.Ready() || !value.conn.IsUsed() {
-					fmt.Println("remove", c.connections.Len() == c.maxConn, !value.conn.Ready(), !value.conn.IsUsed())
-					c.removeCache(expireReq.key)
-					continue
-				}
+			if value.latestGetTime.Before(time.Now().Add(-c.expireTime)) &&
+				(c.connections.Len() == c.maxConn || !value.conn.Ready() || !value.conn.IsUsed()) {
+				c.removeCache(expireReq.key)
+				continue
 			}
 
 			c.addToCache(expireReq.key, value.conn)
 		case req := <-c.requests:
-			// 获取缓存之前就会过期
-			// 所以过期时加锁即可防止这边穿透
 			conn, exist := c.connections.Get(req.key)
 			if !exist {
 				lowerCacheValue, lowerExist := c.lowerConnCache[req.key]
@@ -178,7 +171,7 @@ func (c *connCache[K, T]) loop() {
 			if exist {
 				if conn.Ready() {
 					c.lowerConnCache[req.key].latestGetTime = c.now
-					c.returnConn(req, conn)
+					c.response(req, conn)
 					continue
 				}
 				c.removeCache(req.key)
@@ -203,7 +196,7 @@ func (c *connCache[K, T]) loop() {
 			for _, client := range waiting[conn.cc.CacheKey()] {
 				// Send it over if the client is still there. Abort otherwise.
 				// This also aborts if the cache context gets cancelled.
-				c.returnConn(client, conn.cc)
+				c.response(client, conn.cc)
 			}
 			delete(waiting, conn.cc.CacheKey())
 		case <-c.ctx.Done():
