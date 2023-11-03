@@ -1,4 +1,4 @@
-package conncache
+package connpool
 
 import (
 	"context"
@@ -50,9 +50,11 @@ type connCache[K comparable, T Conn[K]] struct {
 	expireRequests chan *expireRequest[K, T]
 	maxConn        int
 	now            time.Time
+
+	onRemove func(K, RemoveReason)
 }
 
-func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration, newConn BuildConnFunc[K, T]) *connCache[K, T] {
+func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration, newConn BuildConnFunc[K, T], onRemove func(K, RemoveReason)) *connCache[K, T] {
 	lowerCache := make(map[K]*cacheValue[K, T])
 	expireRequests := make(chan *expireRequest[K, T], 100)
 	c := &connCache[K, T]{
@@ -69,6 +71,7 @@ func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration
 		expireRequests: expireRequests,
 		maxConn:        maxConn,
 		now:            time.Now(),
+		onRemove:       onRemove,
 	}
 
 	c.ctx, c.cancel = context.WithCancel(context.Background())
@@ -108,12 +111,34 @@ func (c *connCache[K, T]) addToCache(key K, value T) {
 	c.connections.Add(key, value)
 }
 
-func (c *connCache[K, T]) removeCache(key K) {
+type RemoveReason struct {
+	Expired       bool
+	Evict         bool
+	BadConnection bool
+}
+
+func (r RemoveReason) Reason() string {
+	if r.BadConnection {
+		return "bad connection"
+	}
+	if r.Evict {
+		return "evict"
+	}
+	if r.Expired {
+		return "expired"
+	}
+	return "unknown"
+}
+
+func (c *connCache[K, T]) removeCache(key K, reason RemoveReason) {
 	if value, exist := c.lowerConnCache[key]; exist {
 		go value.conn.Close()
 		delete(c.lowerConnCache, key)
 	}
 	c.connections.Remove(key)
+	if c.onRemove != nil {
+		go c.onRemove(key, reason)
+	}
 }
 
 func (c *connCache[K, T]) response(req *connectionRequest[K, T], conn T) {
@@ -151,9 +176,14 @@ func (c *connCache[K, T]) loop() {
 			// 过期的同时有新的连接请求
 			// 过期的同时有连接正在被持有
 			value := c.lowerConnCache[expireReq.key]
-			if value.latestGetTime.Before(time.Now().Add(-c.expireTime)) &&
-				(c.connections.Len() == c.maxConn || !value.conn.Ready() || !value.conn.IsUsed()) {
-				c.removeCache(expireReq.key)
+			expired := value.latestGetTime.Before(time.Now().Add(-c.expireTime))
+			evict := c.connections.Len() == c.maxConn
+			if evict || !value.conn.Ready() || (expired && !value.conn.IsUsed()) {
+				c.removeCache(expireReq.key, RemoveReason{
+					Expired:       expired,
+					Evict:         evict,
+					BadConnection: !value.conn.Ready(),
+				})
 				continue
 			}
 
@@ -174,7 +204,9 @@ func (c *connCache[K, T]) loop() {
 					c.response(req, conn)
 					continue
 				}
-				c.removeCache(req.key)
+				c.removeCache(req.key, RemoveReason{
+					BadConnection: true,
+				})
 			}
 
 			if alreadyWaiting, ok := waiting[req.key]; ok {
