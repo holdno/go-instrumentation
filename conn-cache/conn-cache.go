@@ -2,7 +2,7 @@ package conncache
 
 import (
 	"context"
-	"sync"
+	"fmt"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -13,22 +13,29 @@ type Conn[K comparable] interface {
 	Ready() bool
 	Close() error
 	CacheKey() K
+	Add()
+	Done()
 }
 
-type cacheResponse[K comparable] struct {
-	cc  Conn[K]
+type cacheValue[K comparable, T Conn[K]] struct {
+	latestGetTime time.Time
+	conn          T
+}
+
+type cacheResponse[K comparable, T Conn[K]] struct {
+	cc  T
 	err error
 }
 
-type connectionRequest[K comparable] struct {
+type connectionRequest[K comparable, T Conn[K]] struct {
 	ctx          context.Context
 	key          K
-	responseChan chan<- *cacheResponse[K]
+	responseChan chan<- *cacheResponse[K, T]
 }
 
-type expireRequest[K comparable] struct {
+type expireRequest[K comparable, T Conn[K]] struct {
 	key K
-	cc  Conn[K]
+	cc  T
 }
 
 type BuildConnFunc[K comparable, T Conn[K]] func(context.Context, K) (T, error)
@@ -36,56 +43,134 @@ type BuildConnFunc[K comparable, T Conn[K]] func(context.Context, K) (T, error)
 type connCache[K comparable, T Conn[K]] struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
+	expireTime     time.Duration
 	genConn        BuildConnFunc[K, T]
-	connections    *expirable.LRU[K, Conn[K]]
-	requests       chan *connectionRequest[K]
-	expireRequests chan *expireRequest[K]
+	connections    *expirable.LRU[K, T]
+	lowerConnCache map[K]*cacheValue[K, T]
+	requests       chan *connectionRequest[K, T]
+	expireRequests chan *expireRequest[K, T]
+	maxConn        int
+	now            time.Time
 }
 
-func NewConnCache[K comparable, T Conn[K]](newConn BuildConnFunc[K, T]) *connCache[K, T] {
+func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration, newConn BuildConnFunc[K, T]) *connCache[K, T] {
+	lowerCache := make(map[K]*cacheValue[K, T])
+	expireRequests := make(chan *expireRequest[K, T], 100)
 	c := &connCache[K, T]{
-		genConn:     newConn,
-		connections: expirable.NewLRU[K, Conn[K]](128, func(key K, value Conn[K]) {}, time.Minute*30),
+		genConn: newConn,
+		connections: expirable.NewLRU[K, T](maxConn, func(key K, value T) {
+			expireRequests <- &expireRequest[K, T]{
+				key: key,
+				cc:  value,
+			}
+		}, expireTime),
+		expireTime:     expireTime,
+		lowerConnCache: lowerCache,
+		requests:       make(chan *connectionRequest[K, T]),
+		expireRequests: expireRequests,
+		maxConn:        maxConn,
 	}
+
+	c.ctx, c.cancel = context.WithCancel(context.Background())
+
+	go c.loop()
 	return c
 }
 
+func (c *connCache[K, T]) GetConn(ctx context.Context, key K) (T, error) {
+	resChan := make(chan *cacheResponse[K, T])
+	var empt T
+	select {
+	case <-ctx.Done():
+		return empt, ctx.Err()
+	case c.requests <- &connectionRequest[K, T]{
+		ctx:          ctx,
+		key:          key,
+		responseChan: resChan,
+	}:
+	}
+
+	select {
+	case <-ctx.Done():
+		return empt, ctx.Err()
+	case res := <-resChan:
+		return res.cc, res.err
+	}
+}
+
+func (c *connCache[K, T]) addToCache(key K, value T) {
+	c.connections.Add(key, value)
+	c.lowerConnCache[key] = &cacheValue[K, T]{
+		latestGetTime: c.now,
+		conn:          value,
+	}
+}
+
+func (c *connCache[K, T]) removeCache(key K) {
+	conn := c.lowerConnCache[key]
+	conn.conn.Close()
+	c.connections.Remove(key)
+	delete(c.lowerConnCache, key)
+}
+
 func (c *connCache[K, T]) loop() {
-	waiting := make(map[K][]*connectionRequest[K])
-	finished := make(chan *cacheResponse[K])
-	locker := make(map[K]*sync.Mutex)
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		for {
+			select {
+			case <-ticker.C:
+				c.now = time.Now()
+			case <-c.ctx.Done():
+				return
+			}
+		}
+	}()
+	waiting := make(map[K][]*connectionRequest[K, T])
+	finished := make(chan *cacheResponse[K, T])
 
 	for {
 		select {
 		case expireReq := <-c.expireRequests:
 			// 过期的同时有新的连接请求
 			// 过期的同时有连接正在被持有
-			//
-			if !expireReq.cc.Ready() {
-				expireReq.cc.Close()
-			} else if locker[expireReq.key].TryLock() {
-				// current not building new connection or builded
-				if _, exist := c.connections.Get(expireReq.key); !exist {
-					if expireReq.cc.IsUsed() {
-						c.connections.Add(expireReq.key, expireReq.cc)
-					}
+			value := c.lowerConnCache[expireReq.key]
+			if value.latestGetTime.Before(time.Now().Add(-c.expireTime)) {
+				if c.connections.Len() == c.maxConn || !value.conn.Ready() || !value.conn.IsUsed() {
+					fmt.Println("remove", c.connections.Len() == c.maxConn, !value.conn.Ready(), !value.conn.IsUsed())
+					c.removeCache(expireReq.key)
+					continue
 				}
-			} else {
-				expireReq.cc.Close()
 			}
+
+			c.addToCache(expireReq.key, value.conn)
 		case req := <-c.requests:
 			// 获取缓存之前就会过期
-			// 所以过期时加锁即可防止这边穿透  
-			if conn, exist := c.connections.Get(req.key); exist {
-				select {
-				case <-req.ctx.Done():
-				case <-c.ctx.Done():
-				case req.responseChan <- &cacheResponse[K]{
-					cc: conn,
-				}:
+			// 所以过期时加锁即可防止这边穿透
+			conn, exist := c.connections.Get(req.key)
+			if !exist {
+				connCacheValue, existCache := c.lowerConnCache[req.key]
+				if existCache {
+					exist = existCache
+					conn = connCacheValue.conn
 				}
-				close(req.responseChan)
-				continue
+			}
+
+			if exist {
+				if !conn.Ready() {
+					c.removeCache(req.key)
+				} else {
+					c.lowerConnCache[req.key].latestGetTime = c.now
+					conn.Add()
+					select {
+					case <-req.ctx.Done():
+					case <-c.ctx.Done():
+					case req.responseChan <- &cacheResponse[K, T]{
+						cc: conn,
+					}:
+					}
+					close(req.responseChan)
+					continue
+				}
 			}
 
 			if alreadyWaiting, ok := waiting[req.key]; ok {
@@ -93,7 +178,7 @@ func (c *connCache[K, T]) loop() {
 				continue
 			}
 
-			waiting[req.key] = []*connectionRequest[K]{req}
+			waiting[req.key] = []*connectionRequest[K, T]{req}
 			go c.buildNewConn(req, finished)
 		case conn := <-finished:
 			if cachedConn, exist := c.connections.Get(conn.cc.CacheKey()); exist {
@@ -101,13 +186,14 @@ func (c *connCache[K, T]) loop() {
 				conn.cc = cachedConn
 			} else {
 				if conn.cc.Ready() { // first to check connect is ready to use.
-					c.connections.Add(conn.cc.CacheKey(), conn.cc)
+					c.addToCache(conn.cc.CacheKey(), conn.cc)
 				}
 			}
 
 			for _, client := range waiting[conn.cc.CacheKey()] {
 				// Send it over if the client is still there. Abort otherwise.
 				// This also aborts if the cache context gets cancelled.
+				conn.cc.Add()
 				select {
 				case client.responseChan <- conn:
 				case <-client.ctx.Done():
@@ -124,10 +210,10 @@ func (c *connCache[K, T]) loop() {
 	}
 }
 
-func (c *connCache[K, T]) buildNewConn(req *connectionRequest[K], respChan chan *cacheResponse[K]) {
+func (c *connCache[K, T]) buildNewConn(req *connectionRequest[K, T], respChan chan<- *cacheResponse[K, T]) {
 	conn, err := c.genConn(req.ctx, req.key)
 	select {
-	case respChan <- &cacheResponse[K]{
+	case respChan <- &cacheResponse[K, T]{
 		cc:  conn,
 		err: err,
 	}:
