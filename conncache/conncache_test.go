@@ -43,7 +43,8 @@ func startServe() string {
 
 func TestConnCache(t *testing.T) {
 	endpoint := startServe()
-	ccCache := conncache.NewConnCache[string, *conncache.GRPCConn[string, *grpc.ClientConn]](10000, time.Second, func(ctx context.Context, s string) (*conncache.GRPCConn[string, *grpc.ClientConn], error) {
+	var ccCache conncache.ConnCache[string, *conncache.GRPCConn[string, *grpc.ClientConn]]
+	ccCache = conncache.NewConnCache[string, *conncache.GRPCConn[string, *grpc.ClientConn]](10000, time.Second, func(ctx context.Context, s string) (*conncache.GRPCConn[string, *grpc.ClientConn], error) {
 		fmt.Println("gen new connect", s)
 		cc, err := grpc.DialContext(ctx, s, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {

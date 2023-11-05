@@ -7,6 +7,10 @@ import (
 	"github.com/hashicorp/golang-lru/v2/expirable"
 )
 
+type ConnCache[K comparable, T Conn[K]] interface {
+	GetConn(ctx context.Context, key K) (T, error)
+}
+
 type Conn[K comparable] interface {
 	IsUsed() bool
 	Ready() bool
