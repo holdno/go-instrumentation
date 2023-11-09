@@ -57,10 +57,11 @@ type connCache[K comparable, T Conn[K]] struct {
 	maxConn        int
 	now            time.Time
 
+	onAdded  func(K)
 	onRemove func(K, RemoveReason)
 }
 
-func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration, newConn BuildConnFunc[K, T], onRemove func(K, RemoveReason)) *connCache[K, T] {
+func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration, newConn BuildConnFunc[K, T], onAdded func(K), onRemove func(K, RemoveReason)) *connCache[K, T] {
 	lowerCache := make(map[K]*cacheValue[K, T])
 	expireRequests := make(chan *expireRequest[K, T], 100)
 	c := &connCache[K, T]{
@@ -77,6 +78,7 @@ func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration
 		expireRequests: expireRequests,
 		maxConn:        maxConn,
 		now:            time.Now(),
+		onAdded:        onAdded,
 		onRemove:       onRemove,
 	}
 
@@ -119,6 +121,9 @@ func (c *connCache[K, T]) addToCache(key K, value T) {
 		}
 	}
 	c.connections.Add(key, value)
+	if c.onAdded != nil {
+		go c.onAdded(key)
+	}
 }
 
 type RemoveReason struct {
@@ -214,7 +219,8 @@ func (c *connCache[K, T]) loop() {
 				if conn.Ready() {
 					c.lowerConnCache[req.key].latestGetTime = c.now
 					c.response(req, &cacheResponse[K, T]{
-						cc: conn,
+						key: req.key,
+						cc:  conn,
 					})
 					continue
 				}

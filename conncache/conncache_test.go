@@ -51,6 +51,8 @@ func TestConnCache(t *testing.T) {
 			return nil, err
 		}
 		return conncache.WrapGrpcConn[string, *grpc.ClientConn](s, cc), nil
+	}, func(s string) {
+
 	}, func(s string, r conncache.RemoveReason) {
 		fmt.Println(s, "removed", r.Reason())
 	})
@@ -101,7 +103,7 @@ func TestTimeout(t *testing.T) {
 	ccCache := conncache.NewConnCache[string, *conncache.GRPCConn[string, *conncache.FakeConn]](100, time.Second, func(ctx context.Context, s string) (*conncache.GRPCConn[string, *conncache.FakeConn], error) {
 		cc := conncache.NewFakeConn(connectivity.Ready)
 		return conncache.WrapGrpcConn[string, *conncache.FakeConn](s, cc), nil
-	}, nil)
+	}, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*5)
 	defer cancel()
@@ -127,7 +129,7 @@ func TestDialError(t *testing.T) {
 	expectError := errors.New("dial error")
 	ccCache := conncache.NewConnCache[string, *conncache.GRPCConn[string, *conncache.FakeConn]](100, time.Second, func(ctx context.Context, s string) (*conncache.GRPCConn[string, *conncache.FakeConn], error) {
 		return nil, expectError
-	}, nil)
+	}, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*5)
 	defer cancel()
@@ -152,7 +154,7 @@ func BenchmarkGetConn(b *testing.B) {
 	ccCache := conncache.NewConnCache[string, *conncache.GRPCConn[string, *conncache.FakeConn]](100, time.Second, func(ctx context.Context, s string) (*conncache.GRPCConn[string, *conncache.FakeConn], error) {
 		cc := conncache.NewFakeConn(connectivity.Ready)
 		return conncache.WrapGrpcConn[string, *conncache.FakeConn](s, cc), nil
-	}, nil)
+	}, nil, nil)
 
 	ctx := context.Background()
 
@@ -174,7 +176,7 @@ func TestMultiKeys(t *testing.T) {
 		fmt.Println("new", s)
 		cc := conncache.NewFakeConn(connectivity.Ready)
 		return conncache.WrapGrpcConn[string, *conncache.FakeConn](s, cc), nil
-	}, func(s string, reason conncache.RemoveReason) {
+	}, nil, func(s string, reason conncache.RemoveReason) {
 		fmt.Println(s, "removed", reason.Reason())
 		removedCount.Add(1)
 	})
