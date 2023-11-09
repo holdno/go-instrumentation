@@ -9,6 +9,7 @@ import (
 
 type ConnCache[K comparable, T Conn[K]] interface {
 	GetConn(ctx context.Context, key K) (T, error)
+	Len() int
 }
 
 type Conn[K comparable] interface {
@@ -83,6 +84,10 @@ func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration
 
 	go c.loop()
 	return c
+}
+
+func (c *connCache[K, T]) Len() int {
+	return c.connections.Len()
 }
 
 func (c *connCache[K, T]) GetConn(ctx context.Context, key K) (T, error) {
