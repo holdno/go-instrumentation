@@ -209,10 +209,8 @@ func (c *connCache[K, T]) loop() {
 			conn, exist := c.connections.Get(req.key)
 			if !exist {
 				lowerCacheValue, lowerExist := c.lowerConnCache[req.key]
-				if lowerExist {
-					exist = lowerExist
-					conn = lowerCacheValue.conn
-				}
+				exist = lowerExist
+				conn = lowerCacheValue.conn
 			}
 
 			if exist {
@@ -239,7 +237,8 @@ func (c *connCache[K, T]) loop() {
 		case conn := <-finished:
 			if cachedConn, exist := c.connections.Get(conn.key); exist {
 				if conn.err == nil {
-					go conn.cc.Close()
+					copy := conn.cc
+					go copy.Close()
 				}
 				conn.cc = cachedConn
 				c.lowerConnCache[cachedConn.CacheKey()].latestGetTime = c.now
