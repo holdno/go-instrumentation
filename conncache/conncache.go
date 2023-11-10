@@ -209,8 +209,10 @@ func (c *connCache[K, T]) loop() {
 			conn, exist := c.connections.Get(req.key)
 			if !exist {
 				lowerCacheValue, lowerExist := c.lowerConnCache[req.key]
-				exist = lowerExist
-				conn = lowerCacheValue.conn
+				if lowerExist {
+					exist = lowerExist
+					conn = lowerCacheValue.conn
+				}
 			}
 
 			if exist {
