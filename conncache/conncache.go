@@ -192,7 +192,13 @@ func (c *connCache[K, T]) loop() {
 		case expireReq := <-c.expireRequests:
 			// 过期的同时有新的连接请求
 			// 过期的同时有连接正在被持有
-			value := c.lowerConnCache[expireReq.key]
+			value, exist := c.lowerConnCache[expireReq.key]
+			if !exist {
+				// 获取链接时，如果链接状态异常，会主动调用removeCache, removeCache会溢出lowerConnCache中的元素，同时删除connects中的缓存，
+				// 而删除connects缓存会再次触发该方法，所以需要检测移除内容是否已经完成移除
+				continue
+			}
+
 			expired := value.latestGetTime.Before(time.Now().Add(-c.expireTime))
 			evict := c.connections.Len() == c.maxConn
 			if evict || !value.conn.Ready() || (expired && !value.conn.IsUsed()) {
