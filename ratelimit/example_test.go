@@ -64,7 +64,7 @@ func ExampleNew() {
 		Addr: "localhost:6379",
 	})
 	_ = rdb.FlushDB(ctx).Err()
-	limit := ratelimit.New("project:123", 10, time.Second*10, ratelimit.NewLimiter(rdb, ratelimit.KeyPrefix("yourprefix_")))
+	limit := ratelimit.New("project:123", 10, time.Second, ratelimit.NewLimiter(rdb, ratelimit.KeyPrefix("yourprefix_")))
 
 	fmt.Println(limit.AllowN(2))
 	rdb.Close()
