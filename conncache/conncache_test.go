@@ -51,33 +51,38 @@ func TestConnCache(t *testing.T) {
 			return nil, err
 		}
 		return conncache.WrapGrpcConn[string, *grpc.ClientConn](s, cc), nil
-	}, func(s string) {
-
+	}, func(s string, reason conncache.AddReason) {
+		fmt.Println(s, "added", reason)
 	}, func(s string, r conncache.RemoveReason) {
 		fmt.Println(s, "removed", r.Reason())
 	})
 
-	for i := 0; i < 20; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		cc, err := ccCache.GetConn(ctx, endpoint)
-		if err != nil {
-			t.Fatal(err)
-		}
+	for i := 0; i < 200; i++ {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			cc, err := ccCache.GetConn(ctx, endpoint)
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+			defer cc.Done()
 
-		time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond)
+			time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond)
 
-		client := greeter.NewGreeterClient(cc.ClientConn())
-		reqCtx, reqCancel := context.WithTimeout(context.Background(), time.Second)
-		defer reqCancel()
-		resp, err := client.SayHello(reqCtx, &greeter.HelloRequest{
-			Name: "xiaoming",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		cc.Done()
-		fmt.Println(resp.Message)
+			client := greeter.NewGreeterClient(cc.ClientConn())
+			reqCtx, reqCancel := context.WithTimeout(context.Background(), time.Second)
+			defer reqCancel()
+			resp, err := client.SayHello(reqCtx, &greeter.HelloRequest{
+				Name: "xiaoming",
+			})
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+			fmt.Println(resp.Message)
+		}()
+
 		time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond)
 	}
 

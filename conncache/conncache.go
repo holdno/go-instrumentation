@@ -57,11 +57,11 @@ type connCache[K comparable, T Conn[K]] struct {
 	maxConn        int
 	now            time.Time
 
-	onAdded  func(K)
+	onAdded  func(K, AddReason)
 	onRemove func(K, RemoveReason)
 }
 
-func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration, newConn BuildConnFunc[K, T], onAdded func(K), onRemove func(K, RemoveReason)) *connCache[K, T] {
+func NewConnCache[K comparable, T Conn[K]](maxConn int, expireTime time.Duration, newConn BuildConnFunc[K, T], onAdded func(K, AddReason), onRemove func(K, RemoveReason)) *connCache[K, T] {
 	lowerCache := make(map[K]*cacheValue[K, T])
 	expireRequests := make(chan *expireRequest[K, T], 100)
 	c := &connCache[K, T]{
@@ -113,18 +113,23 @@ func (c *connCache[K, T]) GetConn(ctx context.Context, key K) (T, error) {
 	}
 }
 
-func (c *connCache[K, T]) addToCache(key K, value T) {
-	if _, exist := c.lowerConnCache[key]; !exist {
-		c.lowerConnCache[key] = &cacheValue[K, T]{
-			latestGetTime: c.now,
-			conn:          value,
-		}
+func (c *connCache[K, T]) addToCache(key K, value T, reason AddReason) {
+	c.lowerConnCache[key] = &cacheValue[K, T]{
+		latestGetTime: c.now,
+		conn:          value,
 	}
 	c.connections.Add(key, value)
 	if c.onAdded != nil {
-		go c.onAdded(key)
+		go c.onAdded(key, reason)
 	}
 }
+
+type AddReason string
+
+const (
+	ADD_REASON_NEW   AddReason = "new"
+	ADD_REASON_USING AddReason = "using"
+)
 
 type RemoveReason struct {
 	Expired       bool
@@ -194,7 +199,7 @@ func (c *connCache[K, T]) loop() {
 			// 过期的同时有连接正在被持有
 			value, exist := c.lowerConnCache[expireReq.key]
 			if !exist {
-				// 获取链接时，如果链接状态异常，会主动调用removeCache, removeCache会溢出lowerConnCache中的元素，同时删除connects中的缓存，
+				// 获取链接时，如果链接状态异常，会主动调用removeCache, removeCache会移除lowerConnCache中的元素，同时删除connects中的缓存，
 				// 而删除connects缓存会再次触发该方法，所以需要检测移除内容是否已经完成移除
 				continue
 			}
@@ -210,10 +215,14 @@ func (c *connCache[K, T]) loop() {
 				continue
 			}
 
-			c.addToCache(expireReq.key, value.conn)
+			if _, exist = c.connections.Get(expireReq.key); !exist {
+				c.addToCache(expireReq.key, value.conn, ADD_REASON_USING)
+			} else {
+				panic("why expired and connect is exist")
+			}
 		case req := <-c.requests:
 			conn, exist := c.connections.Get(req.key)
-			if !exist {
+			if !exist { // 不存在可能是刚好触发了lru的过期
 				lowerCacheValue, lowerExist := c.lowerConnCache[req.key]
 				if lowerExist {
 					exist = lowerExist
@@ -243,16 +252,7 @@ func (c *connCache[K, T]) loop() {
 			waiting[req.key] = []*connectionRequest[K, T]{req}
 			go c.buildNewConn(req, finished)
 		case conn := <-finished:
-			if cachedConn, exist := c.connections.Get(conn.key); exist {
-				if conn.err == nil {
-					copy := conn.cc
-					go copy.Close()
-				}
-				conn.cc = cachedConn
-				c.lowerConnCache[cachedConn.CacheKey()].latestGetTime = c.now
-			} else if conn.err == nil { // check connect is ready to use.
-				c.addToCache(conn.cc.CacheKey(), conn.cc)
-			}
+			c.addToCache(conn.key, conn.cc, ADD_REASON_NEW)
 
 			for _, client := range waiting[conn.key] {
 				// Send it over if the client is still there. Abort otherwise.
