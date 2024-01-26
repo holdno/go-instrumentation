@@ -217,8 +217,6 @@ func (c *connCache[K, T]) loop() {
 
 			if _, exist = c.connections.Get(expireReq.key); !exist {
 				c.addToCache(expireReq.key, value.conn, ADD_REASON_USING)
-			} else {
-				panic("why expired and connect is exist")
 			}
 		case req := <-c.requests:
 			conn, exist := c.connections.Get(req.key)
