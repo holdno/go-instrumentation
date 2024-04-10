@@ -29,7 +29,7 @@ func (g *Greeter) SayHello(ctx context.Context, req *greeter.HelloRequest) (*gre
 }
 
 func startServe() string {
-	endpoint := "127.0.0.1:3332"
+	endpoint := "127.0.0.1:3333"
 
 	srv := grpc.NewServer()
 	lis, err := net.Listen("tcp", endpoint)
@@ -50,7 +50,7 @@ func TestConnCache(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		return conncache.WrapGrpcConn[string, *grpc.ClientConn](s, cc), nil
+		return conncache.WrapGrpcConn(s, cc), nil
 	}, func(s string, reason conncache.AddReason) {
 		fmt.Println(s, "added", reason)
 	}, func(s string, r conncache.RemoveReason) {
@@ -58,6 +58,10 @@ func TestConnCache(t *testing.T) {
 	})
 
 	for i := 0; i < 200; i++ {
+		if i%15 == 0 {
+			result := ccCache.GetQueueLoad()
+			fmt.Println("queue load", result)
+		}
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
